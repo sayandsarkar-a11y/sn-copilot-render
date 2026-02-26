@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>SN Copilot</title>
+</head>
+<body style="font-family:Arial;padding:40px">
+  <h2>ServiceNow Copilot</h2>
+
+  <div>
+    <input id="instance" placeholder="https://devxxxx.service-now.com" style="width:300px;padding:8px"/>
+    <button onclick="connect()">Connect</button>
+  </div>
+
+  <div id="status" style="margin-top:20px;color:green"></div>
+
+  <script>
+    async function check(){
+      const r = await fetch("/api/status");
+      const j = await r.json();
+      if(j.connected){
+        document.getElementById("status").innerText = "Connected to " + j.instanceUrl;
+      }
+    }
+
+    function connect(){
+      const inst = document.getElementById("instance").value;
+      window.location.href = "/auth/start?instance=" + encodeURIComponent(inst);
+    }
+
+    check();
+  </script>
+</body>
+</html>
