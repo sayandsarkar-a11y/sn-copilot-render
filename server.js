@@ -47,7 +47,7 @@ async function geminiGeneratePlan({ userText }) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("Missing GEMINI_API_KEY env var");
 
-  const model = "gemini-2.0-flash";
+  const model = "gemini-3-pro-preview";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
   const systemInstruction = `
