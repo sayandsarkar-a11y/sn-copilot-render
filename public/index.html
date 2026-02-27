@@ -1,35 +1,392 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>SN Copilot</title>
-</head>
-<body style="font-family:Arial;padding:40px">
-  <h2>ServiceNow Copilot</h2>
+  <title>ServiceNow Copilot</title>
+  <style>
+    :root{
+      --bg:#0b1220;
+      --card:#0f172a;
+      --muted:#94a3b8;
+      --text:#e2e8f0;
+      --line:rgba(148,163,184,.18);
+      --shadow: 0 10px 30px rgba(0,0,0,.35);
+      --r:18px;
+      --ok:#22c55e;
+      --warn:#f59e0b;
+      --bad:#ef4444;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+    }
+    body{
+      margin:0;
+      background: radial-gradient(1200px 700px at 20% 10%, #1f2a44 0%, var(--bg) 55%);
+      color:var(--text);
+    }
+    .wrap{ max-width:1100px; margin:0 auto; padding:24px; }
+    .top{ display:flex; justify-content:space-between; align-items:center; gap:16px; }
+    h1{ margin:0; font-size:28px; letter-spacing:-.02em; }
+    .sub{ margin:6px 0 0; color:var(--muted); font-size:14px; }
 
-  <div>
-    <input id="instance" placeholder="https://devxxxx.service-now.com" style="width:300px;padding:8px"/>
-    <button onclick="connect()">Connect</button>
+    .badge{
+      padding:6px 10px; border-radius:999px; font-size:12px;
+      border:1px solid var(--line);
+      background:rgba(148,163,184,.08);
+      color:var(--muted);
+      white-space:nowrap;
+    }
+    .badge.ok{ background:rgba(34,197,94,.12); border-color:rgba(34,197,94,.25); color:#86efac; }
+    .badge.bad{ background:rgba(239,68,68,.10); border-color:rgba(239,68,68,.25); color:#fecaca; }
+
+    .grid{ display:grid; grid-template-columns: 1.6fr 1fr; gap:16px; margin-top:16px; }
+    @media(max-width: 900px){ .grid{ grid-template-columns:1fr; } }
+
+    .card{
+      background:rgba(15,23,42,.92);
+      border:1px solid var(--line);
+      border-radius:var(--r);
+      box-shadow:var(--shadow);
+      padding:16px;
+    }
+    .row{ display:flex; gap:10px; align-items:center; }
+    .grow{ flex:1; }
+
+    .label{ color:var(--muted); font-size:12px; margin-bottom:6px; display:block; }
+    .input{
+      width:100%;
+      padding:12px 12px;
+      border-radius:14px;
+      border:1px solid var(--line);
+      background:rgba(2,6,23,.55);
+      color:var(--text);
+      outline:none;
+    }
+    .input:focus{ border-color: rgba(226,232,240,.5); }
+
+    .btn{
+      padding:12px 14px;
+      border-radius:14px;
+      border:1px solid rgba(226,232,240,.2);
+      background:#e2e8f0;
+      color:#0b1220;
+      cursor:pointer;
+      font-weight:700;
+    }
+    .btn:hover{ filter:brightness(.96); }
+    .btn:disabled{ opacity:.55; cursor:not-allowed; }
+    .btn.ghost{
+      background:transparent; color:var(--text);
+      border-color: rgba(226,232,240,.18);
+      font-weight:600;
+    }
+    .btn.green{
+      background:var(--ok); color:#052e12;
+      border-color:rgba(34,197,94,.35);
+    }
+
+    .hint{ color:var(--muted); font-size:12px; margin-top:10px; }
+
+    .chat{ display:flex; flex-direction:column; min-height:540px; }
+    .messages{ flex:1; overflow:auto; padding:6px; display:flex; flex-direction:column; gap:10px; }
+    .bubble{
+      max-width:85%;
+      padding:10px 12px;
+      border-radius:16px;
+      font-size:14px;
+      line-height:1.35;
+      white-space:pre-wrap;
+      border:1px solid transparent;
+    }
+    .bubble.user{
+      align-self:flex-end;
+      background:#e2e8f0;
+      color:#0b1220;
+    }
+    .bubble.bot{
+      align-self:flex-start;
+      background:rgba(148,163,184,.14);
+      color:var(--text);
+      border-color: rgba(148,163,184,.18);
+    }
+    .bubble.sys{
+      align-self:center;
+      background:rgba(148,163,184,.08);
+      color:var(--muted);
+      border-color: rgba(148,163,184,.18);
+      font-size:12px;
+      max-width:100%;
+    }
+
+    .composer{ display:flex; gap:10px; margin-top:10px; }
+
+    .pre{
+      max-height:420px;
+      overflow:auto;
+      padding:12px;
+      background:rgba(2,6,23,.55);
+      border:1px solid var(--line);
+      border-radius:14px;
+      font-size:12px;
+    }
+
+    .err{
+      margin-top:10px;
+      border:1px solid rgba(239,68,68,.25);
+      background:rgba(239,68,68,.10);
+      color:#fecaca;
+      border-radius:14px;
+      padding:10px 12px;
+      font-size:12px;
+      display:none;
+      white-space:pre-wrap;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <header class="top">
+      <div>
+        <h1>ServiceNow Copilot</h1>
+        <p class="sub">Connect an instance, describe changes in chat, review the plan, then approve & apply.</p>
+      </div>
+      <span id="badge" class="badge">Checking…</span>
+    </header>
+
+    <section class="card" style="margin-top:16px;">
+      <div class="row">
+        <div class="grow">
+          <span class="label">ServiceNow instance URL</span>
+          <input id="instance" class="input" placeholder="https://devxxxxx.service-now.com" />
+        </div>
+        <div style="display:flex; flex-direction:column; gap:10px; width:220px;">
+          <button id="connectBtn" class="btn">Connect</button>
+          <button id="refreshBtn" class="btn ghost">Refresh status</button>
+        </div>
+      </div>
+      <div class="hint">
+        You will be redirected to ServiceNow to allow access, then returned here.
+      </div>
+    </section>
+
+    <section class="grid">
+      <!-- Chat -->
+      <section class="card chat">
+        <div class="row" style="justify-content:space-between;">
+          <div style="font-weight:700;">Chat</div>
+          <div class="hint" id="connectedHint" style="margin:0;">—</div>
+        </div>
+
+        <div id="messages" class="messages"></div>
+
+        <div class="composer">
+          <input id="msg" class="input" placeholder="e.g. Add a choice field u_customer_tier to incident with Gold, Silver, Bronze and make it mandatory" />
+          <button id="sendBtn" class="btn">Send</button>
+        </div>
+
+        <div id="errBox" class="err"></div>
+      </section>
+
+      <!-- Plan -->
+      <section class="card">
+        <div style="font-weight:700; margin-bottom:10px;">Proposed plan</div>
+        <pre id="planBox" class="pre">(none)</pre>
+
+        <div class="row" style="margin-top:10px;">
+          <button id="applyBtn" class="btn green" disabled>Approve & Apply</button>
+          <button id="cancelBtn" class="btn ghost" disabled>Cancel</button>
+        </div>
+
+        <div class="hint">
+          Tip: Start with one field at a time for the MVP. We’ll expand multi-step changes next.
+        </div>
+      </section>
+    </section>
   </div>
 
-  <div id="status" style="margin-top:20px;color:green"></div>
-
   <script>
-    async function check(){
-      const r = await fetch("/api/status");
-      const j = await r.json();
-      if(j.connected){
-        document.getElementById("status").innerText = "Connected to " + j.instanceUrl;
+    const $ = (id) => document.getElementById(id);
+
+    const badge = $("badge");
+    const instanceIn = $("instance");
+    const connectBtn = $("connectBtn");
+    const refreshBtn = $("refreshBtn");
+
+    const messages = $("messages");
+    const msgIn = $("msg");
+    const sendBtn = $("sendBtn");
+
+    const planBox = $("planBox");
+    const applyBtn = $("applyBtn");
+    const cancelBtn = $("cancelBtn");
+    const errBox = $("errBox");
+    const connectedHint = $("connectedHint");
+
+    let pendingPlan = null;
+    let connectedInstance = null;
+
+    function showError(text){
+      if(!text){
+        errBox.style.display = "none";
+        errBox.textContent = "";
+        return;
+      }
+      errBox.style.display = "block";
+      errBox.textContent = text;
+    }
+
+    function addBubble(role, text){
+      const div = document.createElement("div");
+      div.className = "bubble " + role;
+      div.textContent = text;
+      messages.appendChild(div);
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    function setConnectedUI(isConnected, instanceUrl){
+      if(isConnected){
+        badge.className = "badge ok";
+        badge.textContent = "Connected";
+        connectedInstance = instanceUrl || connectedInstance;
+        connectedHint.textContent = connectedInstance ? ("Instance: " + connectedInstance) : "Connected";
+        msgIn.disabled = false;
+        sendBtn.disabled = false;
+      } else {
+        badge.className = "badge";
+        badge.textContent = "Not connected";
+        connectedInstance = null;
+        connectedHint.textContent = "Connect to start";
+        msgIn.disabled = true;
+        sendBtn.disabled = true;
+        applyBtn.disabled = true;
+        cancelBtn.disabled = true;
+        pendingPlan = null;
+        planBox.textContent = "(none)";
       }
     }
 
-    function connect(){
-      const inst = document.getElementById("instance").value;
-      window.location.href = "/auth/start?instance=" + encodeURIComponent(inst);
+    async function refreshStatus(){
+      showError("");
+      try{
+        const r = await fetch("/api/status");
+        const j = await r.json();
+        if(j.connected){
+          setConnectedUI(true, j.instanceUrl);
+          return true;
+        }
+        setConnectedUI(false);
+        return false;
+      }catch(e){
+        setConnectedUI(false);
+        showError("Status check failed: " + e.message);
+        return false;
+      }
     }
 
-    check();
+    connectBtn.onclick = () => {
+      showError("");
+      const inst = instanceIn.value.trim().replace(/\/+$/, "");
+      if(!inst.startsWith("https://")){
+        showError("Please enter a valid instance URL starting with https://");
+        return;
+      }
+      // redirect to backend auth start
+      window.location.href = "/auth/start?instance=" + encodeURIComponent(inst);
+    };
+
+    refreshBtn.onclick = () => refreshStatus();
+
+    sendBtn.onclick = async () => {
+      showError("");
+      const text = msgIn.value.trim();
+      if(!text) return;
+
+      addBubble("user", text);
+      msgIn.value = "";
+
+      try{
+        const r = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text })
+        });
+
+        const j = await r.json();
+        if(!r.ok){
+          showError("Chat error: " + JSON.stringify(j));
+          addBubble("bot", "I couldn’t generate a plan. Check error panel.");
+          return;
+        }
+        if(j.error){
+          showError(j.error);
+          addBubble("bot", "Not connected or error occurred. Check error panel.");
+          return;
+        }
+
+        pendingPlan = j.plan;
+        planBox.textContent = JSON.stringify(pendingPlan, null, 2);
+        applyBtn.disabled = false;
+        cancelBtn.disabled = false;
+
+        addBubble("bot", "Plan generated. Review it on the right, then click Approve & Apply.");
+      }catch(e){
+        showError("Chat request failed: " + e.message);
+        addBubble("bot", "Network error while generating plan.");
+      }
+    };
+
+    msgIn.addEventListener("keydown", (e) => {
+      if(e.key === "Enter"){
+        e.preventDefault();
+        sendBtn.click();
+      }
+    });
+
+    cancelBtn.onclick = () => {
+      showError("");
+      pendingPlan = null;
+      planBox.textContent = "(none)";
+      applyBtn.disabled = true;
+      cancelBtn.disabled = true;
+      addBubble("sys", "Plan cleared.");
+    };
+
+    applyBtn.onclick = async () => {
+      showError("");
+      if(!pendingPlan) return;
+
+      addBubble("sys", "Executing…");
+      applyBtn.disabled = true;
+
+      try{
+        const r = await fetch("/api/execute", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ plan: pendingPlan })
+        });
+
+        const j = await r.json();
+        if(!r.ok){
+          showError("Execute error: " + JSON.stringify(j, null, 2));
+          addBubble("bot", "Execution failed. See error panel.");
+          applyBtn.disabled = false;
+          return;
+        }
+
+        addBubble("bot", "Execution result:\n" + JSON.stringify(j, null, 2));
+        pendingPlan = null;
+        planBox.textContent = "(none)";
+        cancelBtn.disabled = true;
+      }catch(e){
+        showError("Execute request failed: " + e.message);
+        addBubble("bot", "Network error while executing.");
+        applyBtn.disabled = false;
+      }
+    };
+
+    // init
+    addBubble("bot", "Hi! Connect an instance, then describe a field change in plain English.");
+    refreshStatus();
   </script>
 </body>
 </html>
