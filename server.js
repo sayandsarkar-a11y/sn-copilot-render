@@ -108,6 +108,18 @@ app.get("/auth/start", (req, res) => {
   res.redirect(authUrl);
 });
 
+app.get("/api/test-call", async (req, res) => {
+  const conn = verify(req.cookies.sn_conn);
+  if (!conn?.accessToken) return res.status(401).json({ error: "Not connected" });
+
+  const r = await fetch(`${conn.instanceUrl}/api/now/table/sys_user?sysparm_limit=1`, {
+    headers: { Authorization: `Bearer ${conn.accessToken}`, Accept: "application/json" }
+  });
+
+  const text = await r.text();
+  res.status(r.status).send(text);
+});
+
 // =======================
 // AUTH CALLBACK
 // =======================
