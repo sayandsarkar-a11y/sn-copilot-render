@@ -242,16 +242,122 @@ app.post("/api/chat", (req, res) => {
 // EXECUTE (dry run for now)
 // =======================
 
-app.post("/api/execute", (req, res) => {
+app.post("/api/execute", async (req, res) => {
   const conn = verify(req.cookies.sn_conn);
-  if (!conn?.accessToken) {
-    return res.status(401).json({ error: "Not connected" });
-  }
+  if (!conn?.accessToken) return res.status(401).json({ error: "Not connected" });
 
-  res.json({
-    status: "DRY_RUN_ONLY",
-    received_plan: req.body?.plan || null
-  });
+  const plan = req.body?.plan;
+  if (!plan?.operations?.length) return res.status(400).json({ error: "Invalid plan" });
+
+  const op = plan.operations[0]; // MVP: single operation
+
+  // ---- Safety checks ----
+  const table = (op.table || plan.table || "").toString();
+  const name = (op.name || "").toString();
+  const type = (op.internal_type || "").toString();
+  const label = (op.label || "").toString();
+  const mandatory = !!op.mandatory;
+  const choices = Array.isArray(op.choices) ? op.choices : [];
+
+  const allowedTypes = new Set(["string", "integer", "boolean", "date", "choice"]);
+  if (!table) return res.status(400).json({ error: "Missing table" });
+  if (!/^u_[a-zA-Z0-9_]+$/.test(name)) return res.status(400).json({ error: "Field name must start with u_" });
+  if (!allowedTypes.has(type)) return res.status(400).json({ error: `Unsupported type: ${type}` });
+  if (type === "choice" && choices.length === 0) return res.status(400).json({ error: "Choice field requires choices[]" });
+
+  try {
+    // 1) Check if field exists
+    const existsUrl =
+      `${conn.instanceUrl}/api/now/table/sys_dictionary?` +
+      new URLSearchParams({
+        sysparm_query: `name=${table}^element=${name}`,
+        sysparm_fields: "sys_id",
+        sysparm_limit: "1"
+      }).toString();
+
+    const existsRes = await fetch(existsUrl, {
+      headers: { Authorization: `Bearer ${conn.accessToken}`, Accept: "application/json" }
+    });
+
+    const existsJson = await existsRes.json();
+    if (existsJson?.result?.length) {
+      return res.json({ status: "SKIPPED", message: "Field already exists", sys_id: existsJson.result[0].sys_id });
+    }
+
+    // 2) Create sys_dictionary record
+    const dictBody = {
+      name: table,
+      element: name,
+      internal_type: type,
+      column_label: label || name,
+      mandatory: mandatory ? "true" : "false"
+    };
+
+    const dictRes = await fetch(`${conn.instanceUrl}/api/now/table/sys_dictionary`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${conn.accessToken}`,
+        Accept: "application/json",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(dictBody)
+    });
+
+    const dictText = await dictRes.text();
+    if (!dictRes.ok) {
+      return res.status(500).json({ error: "sys_dictionary create failed", details: dictText });
+    }
+
+    const dictJson = JSON.parse(dictText);
+    const dictSysId = dictJson?.result?.sys_id;
+
+    // 3) Create sys_choice records (if choice)
+    const createdChoices = [];
+    if (type === "choice") {
+      for (let i = 0; i < choices.length; i++) {
+        const choice = String(choices[i]).trim();
+        if (!choice) continue;
+
+        const choiceBody = {
+          name: table,
+          element: name,
+          label: choice,
+          value: choice,
+          sequence: String(100 + i * 10)
+        };
+
+        const chRes = await fetch(`${conn.instanceUrl}/api/now/table/sys_choice`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${conn.accessToken}`,
+            Accept: "application/json",
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(choiceBody)
+        });
+
+        const chText = await chRes.text();
+        if (!chRes.ok) {
+          return res.status(500).json({
+            error: "sys_choice create failed",
+            details: chText,
+            partial: { dictSysId, createdChoices }
+          });
+        }
+
+        const chJson = JSON.parse(chText);
+        createdChoices.push(chJson?.result?.sys_id);
+      }
+    }
+
+    return res.json({
+      status: "CREATED",
+      dict_sys_id: dictSysId,
+      choices_sys_ids: createdChoices
+    });
+  } catch (e) {
+    return res.status(500).json({ error: "Execution error", details: String(e) });
+  }
 });
 
 // =======================
