@@ -47,29 +47,36 @@ async function geminiGeneratePlan({ userText }) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("Missing GEMINI_API_KEY env var");
 
-  // Gemini REST generateContent endpoint (v1beta)
-  const model = "gemini-2.0-flash"; // you can change later
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`; // :contentReference[oaicite:1]{index=1}
+  const model = "gemini-2.0-flash";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
   const systemInstruction = `
-You convert natural-language ServiceNow change requests into a JSON plan.
-Return ONLY JSON. No markdown. No commentary.
+Return ONLY valid JSON (no markdown).
+Convert the user request into a ServiceNow field-change plan.
+
+Required output shape:
+{
+  "intent": "FIELD_CHANGE",
+  "operations": [
+    {
+      "action": "CREATE_FIELD",
+      "table": "<table>",
+      "name": "u_<field_name>",
+      "internal_type": "string|integer|boolean|date|choice",
+      "label": "<label>",
+      "mandatory": true|false,
+      "choices": ["A","B"] // REQUIRED if internal_type is "choice"
+    }
+  ],
+  "notes": "..."
+}
 
 Rules:
-- intent must be "FIELD_CHANGE"
-- operations is an array (1..5). For MVP, usually 1.
-- action must be "CREATE_FIELD"
-- table is required (e.g. incident, task)
-- name must start with u_
-- internal_type must be one of: string, integer, boolean, date, choice
-- label must be human-friendly
-- mandatory true only if user clearly requests required/mandatory
-- If internal_type is "choice", you MUST include choices as a non-empty array in the desired order.
-- If ambiguous, make a best guess and include notes.
+- Field name must start with u_
+- If user asks for a choice field, internal_type MUST be "choice" and choices MUST be present and non-empty.
+- Put the table inside the operation as "table".
 `.trim();
 
-  // Gemini "response_schema" in REST uses the typed schema format (OBJECT/ARRAY/STRING/etc.)
-  // and "response_mime_type": "application/json" enforces JSON output. :contentReference[oaicite:2]{index=2}
   const response_schema = {
     type: "OBJECT",
     properties: {
@@ -96,7 +103,7 @@ Rules:
   };
 
   const body = {
-    system_instruction: { parts: [{ text: systemInstruction }] }, // :contentReference[oaicite:3]{index=3}
+    system_instruction: { parts: [{ text: systemInstruction }] },
     contents: [{ role: "user", parts: [{ text: userText }] }],
     generationConfig: {
       response_mime_type: "application/json",
@@ -106,57 +113,37 @@ Rules:
 
   const r = await fetch(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-goog-api-key": apiKey
-    },
+    headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
     body: JSON.stringify(body)
   });
 
   const j = await r.json();
   if (!r.ok) throw new Error(`Gemini error: ${JSON.stringify(j)}`);
 
-  // Extract the model text
-  const text =
-    j?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("")?.trim() || "";
-
+  const text = j?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("")?.trim() || "";
   if (!text) throw new Error("Gemini returned empty response");
 
-  let plan;
-  try {
-    plan = JSON.parse(text);
-  } catch {
-    throw new Error(`Gemini did not return valid JSON. Raw: ${text.slice(0, 400)}`);
-  }
+  const plan = JSON.parse(text);
 
-  // ---- Hard validation / normalization (important) ----
+  // hard guards
   if (plan.intent !== "FIELD_CHANGE") plan.intent = "FIELD_CHANGE";
-  if (!Array.isArray(plan.operations) || plan.operations.length === 0) {
-    throw new Error("Invalid plan: operations missing");
-  }
+  if (!Array.isArray(plan.operations) || plan.operations.length === 0) throw new Error("No operations returned");
 
-  // MVP: use first op
   const op = plan.operations[0];
   op.action = "CREATE_FIELD";
 
-  // Enforce u_ prefix
-  if (typeof op.name === "string" && !op.name.startsWith("u_")) {
-    op.name = "u_" + op.name.replace(/^u_*/, "");
-  }
+  if (!op.table) throw new Error("Missing table in operation");
+  if (typeof op.name !== "string" || !op.name.startsWith("u_")) throw new Error("Field name must start with u_");
 
-  // If it's a choice field, ensure choices are present
   if (op.internal_type === "choice") {
     if (!Array.isArray(op.choices) || op.choices.length === 0) {
-      throw new Error("Choice field requested but Gemini did not include choices[]");
+      throw new Error("Choice field requires choices[]");
     }
-    // Trim and de-dupe, preserve order
+    // cleanup
     const seen = new Set();
-    op.choices = op.choices
-      .map(c => String(c).trim())
-      .filter(c => c && !seen.has(c) && (seen.add(c), true));
-    if (op.choices.length === 0) throw new Error("choices[] became empty after cleanup");
+    op.choices = op.choices.map(c => String(c).trim()).filter(c => c && !seen.has(c) && (seen.add(c), true));
+    if (op.choices.length === 0) throw new Error("choices[] empty after cleanup");
   } else {
-    // If not choice, remove choices to avoid confusion
     delete op.choices;
   }
 
@@ -332,31 +319,51 @@ app.get("/api/status", (req, res) => {
 // CHAT (stub)
 // =======================
 
-app.post("/api/chat", (req, res) => {
+// app.post("/api/chat", (req, res) => {
+//   const conn = verify(req.cookies.sn_conn);
+//   if (!conn?.accessToken) {
+//     return res.status(401).json({ error: "Not connected" });
+//   }
+
+//   const msg = (req.body?.message || "").toString();
+
+//   res.json({
+//     plan: {
+//       intent: "FIELD_CHANGE",
+//       table: "incident",
+//       operations: [
+//         {
+//           action: "CREATE_FIELD",
+//           name: "u_example_field",
+//           internal_type: "string",
+//           label: "Example field",
+//           mandatory: false
+//         }
+//       ],
+//       original_user_text: msg,
+//       requires_approval: true
+//     }
+//   });
+// });
+
+app.post("/api/chat", async (req, res) => {
   const conn = verify(req.cookies.sn_conn);
-  if (!conn?.accessToken) {
-    return res.status(401).json({ error: "Not connected" });
+  if (!conn?.accessToken) return res.status(401).json({ error: "Not connected" });
+
+  const msg = (req.body?.message || "").toString().trim();
+  if (!msg) return res.status(400).json({ error: "Missing message" });
+
+  try {
+    const plan = await geminiGeneratePlan({ userText: msg });
+
+    // Optional: include original text & approval flag for UI
+    plan.original_user_text = msg;
+    plan.requires_approval = true;
+
+    return res.json({ plan });
+  } catch (e) {
+    return res.status(500).json({ error: String(e.message || e) });
   }
-
-  const msg = (req.body?.message || "").toString();
-
-  res.json({
-    plan: {
-      intent: "FIELD_CHANGE",
-      table: "incident",
-      operations: [
-        {
-          action: "CREATE_FIELD",
-          name: "u_example_field",
-          internal_type: "string",
-          label: "Example field",
-          mandatory: false
-        }
-      ],
-      original_user_text: msg,
-      requires_approval: true
-    }
-  });
 });
 
 // =======================
