@@ -43,106 +43,99 @@ function verify(token) {
   return JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
 }
 
-async function geminiGeneratePlan({ userText }) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("Missing GEMINI_API_KEY env var");
+async function deepseekGeneratePlan({ userText }) {
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+  if (!apiKey) throw new Error("Missing DEEPSEEK_API_KEY env var");
 
-  const model = "gemini-3-pro-preview";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+  const systemPrompt = `
+You convert natural-language ServiceNow change requests into strict JSON.
 
-  const systemInstruction = `
-Return ONLY valid JSON (no markdown).
-Convert the user request into a ServiceNow field-change plan.
+Return ONLY JSON. No markdown. No commentary.
 
-Required output shape:
+Required format:
 {
   "intent": "FIELD_CHANGE",
   "operations": [
     {
       "action": "CREATE_FIELD",
-      "table": "<table>",
-      "name": "u_<field_name>",
+      "table": "incident",
+      "name": "u_field_name",
       "internal_type": "string|integer|boolean|date|choice",
-      "label": "<label>",
+      "label": "Field Label",
       "mandatory": true|false,
-      "choices": ["A","B"] // REQUIRED if internal_type is "choice"
+      "choices": ["A","B"]   // REQUIRED if internal_type is "choice"
     }
   ],
-  "notes": "..."
+  "notes": "optional notes"
 }
 
 Rules:
-- Field name must start with u_
-- If user asks for a choice field, internal_type MUST be "choice" and choices MUST be present and non-empty.
-- Put the table inside the operation as "table".
-`.trim();
+- Field name MUST start with u_
+- If user requests choice field, internal_type MUST be "choice"
+- If internal_type is choice, choices array MUST be included
+- Always include table inside each operation
+- Mandatory true only if user explicitly says mandatory/required
+`;
 
-  const response_schema = {
-    type: "OBJECT",
-    properties: {
-      intent: { type: "STRING" },
-      operations: {
-        type: "ARRAY",
-        items: {
-          type: "OBJECT",
-          properties: {
-            action: { type: "STRING" },
-            table: { type: "STRING" },
-            name: { type: "STRING" },
-            internal_type: { type: "STRING" },
-            label: { type: "STRING" },
-            mandatory: { type: "BOOLEAN" },
-            choices: { type: "ARRAY", items: { type: "STRING" } }
-          },
-          required: ["action", "table", "name", "internal_type", "label", "mandatory"]
-        }
-      },
-      notes: { type: "STRING" }
-    },
-    required: ["intent", "operations"]
-  };
-
-  const body = {
-    system_instruction: { parts: [{ text: systemInstruction }] },
-    contents: [{ role: "user", parts: [{ text: userText }] }],
-    generationConfig: {
-      response_mime_type: "application/json",
-      response_schema
-    }
-  };
-
-  const r = await fetch(url, {
+  const response = await fetch("https://api.deepseek.com/v1/chat/completions", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-    body: JSON.stringify(body)
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: "deepseek-chat",
+      temperature: 0,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userText }
+      ]
+    })
   });
 
-  const j = await r.json();
-  if (!r.ok) throw new Error(`Gemini error: ${JSON.stringify(j)}`);
+  const data = await response.json();
 
-  const text = j?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("")?.trim() || "";
-  if (!text) throw new Error("Gemini returned empty response");
+  if (!response.ok) {
+    throw new Error(`DeepSeek error: ${JSON.stringify(data)}`);
+  }
 
-  const plan = JSON.parse(text);
+  const text = data?.choices?.[0]?.message?.content?.trim();
+  if (!text) throw new Error("DeepSeek returned empty response");
 
-  // hard guards
+  let plan;
+  try {
+    plan = JSON.parse(text);
+  } catch (err) {
+    throw new Error("DeepSeek did not return valid JSON:\n" + text);
+  }
+
+  // ---- HARD VALIDATION ----
   if (plan.intent !== "FIELD_CHANGE") plan.intent = "FIELD_CHANGE";
-  if (!Array.isArray(plan.operations) || plan.operations.length === 0) throw new Error("No operations returned");
+  if (!Array.isArray(plan.operations) || plan.operations.length === 0) {
+    throw new Error("No operations returned from DeepSeek");
+  }
 
   const op = plan.operations[0];
   op.action = "CREATE_FIELD";
 
-  if (!op.table) throw new Error("Missing table in operation");
-  if (typeof op.name !== "string" || !op.name.startsWith("u_")) throw new Error("Field name must start with u_");
+  if (!op.table) throw new Error("Missing table");
+  if (!op.name?.startsWith("u_")) throw new Error("Field name must start with u_");
+
+  const allowedTypes = ["string", "integer", "boolean", "date", "choice"];
+  if (!allowedTypes.includes(op.internal_type)) {
+    throw new Error("Invalid internal_type: " + op.internal_type);
+  }
 
   if (op.internal_type === "choice") {
     if (!Array.isArray(op.choices) || op.choices.length === 0) {
-      throw new Error("Choice field requires choices[]");
+      throw new Error("Choice field requires non-empty choices array");
     }
-    // cleanup
+
+    // sanitize choices
     const seen = new Set();
-    op.choices = op.choices.map(c => String(c).trim()).filter(c => c && !seen.has(c) && (seen.add(c), true));
-    if (op.choices.length === 0) throw new Error("choices[] empty after cleanup");
+    op.choices = op.choices
+      .map(c => String(c).trim())
+      .filter(c => c && !seen.has(c) && (seen.add(c), true));
   } else {
     delete op.choices;
   }
@@ -150,6 +143,114 @@ Rules:
   plan.operations = [op];
   return plan;
 }
+
+// async function geminiGeneratePlan({ userText }) {
+//   const apiKey = process.env.GEMINI_API_KEY;
+//   if (!apiKey) throw new Error("Missing GEMINI_API_KEY env var");
+
+//   const model = "gemini-3-pro-preview";
+//   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+
+//   const systemInstruction = `
+// Return ONLY valid JSON (no markdown).
+// Convert the user request into a ServiceNow field-change plan.
+
+// Required output shape:
+// {
+//   "intent": "FIELD_CHANGE",
+//   "operations": [
+//     {
+//       "action": "CREATE_FIELD",
+//       "table": "<table>",
+//       "name": "u_<field_name>",
+//       "internal_type": "string|integer|boolean|date|choice",
+//       "label": "<label>",
+//       "mandatory": true|false,
+//       "choices": ["A","B"] // REQUIRED if internal_type is "choice"
+//     }
+//   ],
+//   "notes": "..."
+// }
+
+// Rules:
+// - Field name must start with u_
+// - If user asks for a choice field, internal_type MUST be "choice" and choices MUST be present and non-empty.
+// - Put the table inside the operation as "table".
+// `.trim();
+
+//   const response_schema = {
+//     type: "OBJECT",
+//     properties: {
+//       intent: { type: "STRING" },
+//       operations: {
+//         type: "ARRAY",
+//         items: {
+//           type: "OBJECT",
+//           properties: {
+//             action: { type: "STRING" },
+//             table: { type: "STRING" },
+//             name: { type: "STRING" },
+//             internal_type: { type: "STRING" },
+//             label: { type: "STRING" },
+//             mandatory: { type: "BOOLEAN" },
+//             choices: { type: "ARRAY", items: { type: "STRING" } }
+//           },
+//           required: ["action", "table", "name", "internal_type", "label", "mandatory"]
+//         }
+//       },
+//       notes: { type: "STRING" }
+//     },
+//     required: ["intent", "operations"]
+//   };
+
+//   const body = {
+//     system_instruction: { parts: [{ text: systemInstruction }] },
+//     contents: [{ role: "user", parts: [{ text: userText }] }],
+//     generationConfig: {
+//       response_mime_type: "application/json",
+//       response_schema
+//     }
+//   };
+
+//   const r = await fetch(url, {
+//     method: "POST",
+//     headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+//     body: JSON.stringify(body)
+//   });
+
+//   const j = await r.json();
+//   if (!r.ok) throw new Error(`Gemini error: ${JSON.stringify(j)}`);
+
+//   const text = j?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("")?.trim() || "";
+//   if (!text) throw new Error("Gemini returned empty response");
+
+//   const plan = JSON.parse(text);
+
+//   // hard guards
+//   if (plan.intent !== "FIELD_CHANGE") plan.intent = "FIELD_CHANGE";
+//   if (!Array.isArray(plan.operations) || plan.operations.length === 0) throw new Error("No operations returned");
+
+//   const op = plan.operations[0];
+//   op.action = "CREATE_FIELD";
+
+//   if (!op.table) throw new Error("Missing table in operation");
+//   if (typeof op.name !== "string" || !op.name.startsWith("u_")) throw new Error("Field name must start with u_");
+
+//   if (op.internal_type === "choice") {
+//     if (!Array.isArray(op.choices) || op.choices.length === 0) {
+//       throw new Error("Choice field requires choices[]");
+//     }
+//     // cleanup
+//     const seen = new Set();
+//     op.choices = op.choices.map(c => String(c).trim()).filter(c => c && !seen.has(c) && (seen.add(c), true));
+//     if (op.choices.length === 0) throw new Error("choices[] empty after cleanup");
+//   } else {
+//     delete op.choices;
+//   }
+
+//   plan.operations = [op];
+//   return plan;
+// }
 
 // =======================
 // PKCE Helpers
@@ -346,23 +447,46 @@ app.get("/api/status", (req, res) => {
 //   });
 // });
 
+// app.post("/api/chat", async (req, res) => {
+//   const conn = verify(req.cookies.sn_conn);
+//   if (!conn?.accessToken) return res.status(401).json({ error: "Not connected" });
+
+//   const msg = (req.body?.message || "").toString().trim();
+//   if (!msg) return res.status(400).json({ error: "Missing message" });
+
+//   try {
+//     const plan = await geminiGeneratePlan({ userText: msg });
+
+//     // Optional: include original text & approval flag for UI
+//     plan.original_user_text = msg;
+//     plan.requires_approval = true;
+
+//     return res.json({ plan });
+//   } catch (e) {
+//     return res.status(500).json({ error: String(e.message || e) });
+//   }
+// });
+
 app.post("/api/chat", async (req, res) => {
   const conn = verify(req.cookies.sn_conn);
-  if (!conn?.accessToken) return res.status(401).json({ error: "Not connected" });
+  if (!conn?.accessToken) {
+    return res.status(401).json({ error: "Not connected" });
+  }
 
-  const msg = (req.body?.message || "").toString().trim();
-  if (!msg) return res.status(400).json({ error: "Missing message" });
+  const msg = (req.body?.message || "").trim();
+  if (!msg) {
+    return res.status(400).json({ error: "Missing message" });
+  }
 
   try {
-    const plan = await geminiGeneratePlan({ userText: msg });
+    const plan = await deepseekGeneratePlan({ userText: msg });
 
-    // Optional: include original text & approval flag for UI
     plan.original_user_text = msg;
     plan.requires_approval = true;
 
     return res.json({ plan });
-  } catch (e) {
-    return res.status(500).json({ error: String(e.message || e) });
+  } catch (err) {
+    return res.status(500).json({ error: String(err.message || err) });
   }
 });
 
